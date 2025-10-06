@@ -12,8 +12,20 @@
 - ✅ User can receive multiple pending trade requests
 - ✅ User remains visible in other people's match lists
 - ✅ User's inventory is still current (they haven't accepted yet)
-- ❌ User cannot initiate NEW requests while they have pending outbound request
-- ✅ User can still RECEIVE requests while they have pending outbound request
+- ❌ User cannot initiate NEW requests while they have pending outbound reT+3: User B accepts request from User C
+     ↓
+     User B + User C: Both ACTIVE, both LOCKED
+     Users A, D, E: Requests still pending (not rejected)
+     Users A, D, E: See "User B is in a trade" (dimmed)
+
+T+5: User B completes trade with User C
+     ↓
+     User B: UNLOCKED
+     Users A, D, E: Requests now STALE (B's inventory changed)
+     System: Recalculates trades for B
+     Users A, D, E: See "Trade Recalculated - Click to Refresh" badge
+     Users A, D, E: Can click to see updated trade (may be different pages)
+     User B: Can now accept another pending request (or newly calculated ones)ser can still RECEIVE requests while they have pending outbound request
 
 ### 2. **Active Trades Are Exclusive**
 - ❌ User can only have ONE active trade at a time
@@ -127,9 +139,9 @@ User B: Has 3 pending inbound requests
 - ⚠️ **Other pending requests remain queued** (not auto-rejected)
 
 **What Others See:**
-- 🔒 **Dimmed** card
+- 🔒 **Dimmed** card (opacity: 0.5)
 - 🔒 "Trade in Progress" badge
-- ❌ "Request Trade" button DISABLED (or removed)
+- ❌ "Request Trade" button DISABLED (grayed out, not clickable)
 - 💬 "Cannot receive requests while trading"
 
 **Example:**
@@ -139,14 +151,17 @@ User B accepts request from User C
   ↓
 User B + User C: Both LOCKED, trade is ACTIVE
   ↓
-Requests from A and D: Still pending, not rejected
+Requests from A and D: Still pending, not auto-rejected
   ↓
 User E tries to request trade with User B:
-  ❌ Button disabled, sees "Trade in Progress"
+  ❌ Button disabled (grayed out), sees "Trade in Progress"
   ↓
 User B completes trade with User C:
   ✅ Unlocked
-  ✅ Requests from A and D still valid
+  ⚠️ Requests from A and D marked as STALE (B's inventory changed)
+  ⚠️ System recalculates trades for User B
+  ⚠️ A and D see "Trade Recalculated - Click to Refresh" badge
+  ⚠️ Clicking refreshes card with new optimal trade (may differ)
   ✅ User E can now request
 ```
 
@@ -276,6 +291,58 @@ $$ LANGUAGE plpgsql SECURITY DEFINER;
 
 ---
 
+## Trade Recalculation & Stale Requests
+
+### When Trades Become Stale
+
+A pending trade request becomes **STALE** when the partner's inventory changes due to:
+1. ✅ Completing an active trade
+2. ✅ Updating their inventory manually
+3. ✅ Adding/removing pages from Book Completion
+
+### Visual Indicator for Stale Trades
+
+When a trade becomes stale, both users see:
+
+```
+┌─────────────────────────────────────┐
+│ ⚠️ TRADE RECALCULATED              │
+│ 👤 Username                         │
+├─────────────────────────────────────┤
+│ Original trade may have changed     │
+│ Click to refresh for current offer  │
+├─────────────────────────────────────┤
+│ [🔄 Refresh Trade] (PRIMARY)        │
+│ [❌ Cancel Trade] (SECONDARY)       │
+└─────────────────────────────────────┘
+```
+
+**CSS:** Orange/yellow highlight, pulsing border (attention-grabbing)  
+**Behavior:** 
+- Card remains visible but marked as potentially outdated
+- User can click "Refresh Trade" to recalculate with current inventories
+- May result in different pages or even no match if inventories diverged
+- Both initiator and target see this badge
+
+### Recalculation Timing
+
+| Event | Recalculates? | Who Sees Badge? |
+|-------|---------------|-----------------|
+| **Trade Completed** | ✅ YES | All users with pending trades to either party |
+| **Inventory Updated** | ✅ YES | All users with pending trades to that user |
+| **Trade Cancelled** | ❌ NO | N/A (trade removed) |
+| **Trade Accepted** | ❌ NO | Other pending trades stay as-is until completion |
+
+### Refresh Behavior
+
+When user clicks **"Refresh Trade"**:
+1. System recalculates optimal trade with current inventories
+2. If match still valid → Update pages and remove badge
+3. If no match → Show "No longer compatible" and remove trade
+4. If better match → Update with new pages and show "Trade improved!" toast
+
+---
+
 ## UI Display Logic (REVISED)
 
 ### Trade Match Card - Visual States
@@ -286,13 +353,18 @@ $$ LANGUAGE plpgsql SECURITY DEFINER;
 │ 👤 Username                         │
 │ Score: 25 • Last seen: 2 hours ago  │
 ├─────────────────────────────────────┤
-│ You want: 12 pages                  │
-│ They want: 13 pages                 │
+│ You want: 1, 5, 23, 45, 67, 89,    │
+│           102, 134, 156, 178, 190,  │
+│           212 (12 pages)            │
+│ They want: 2, 8, 34, 56, 78, 91,   │
+│            103, 145, 167, 189, 201, │
+│            223 (12 pages)           │
 ├─────────────────────────────────────┤
 │ [Request Trade] 🤝 (ENABLED)        │
 └─────────────────────────────────────┘
 ```
-**CSS:** `opacity: 1`, normal colors
+**CSS:** `opacity: 1`, normal colors  
+**Note:** Full page lists shown (abbreviated here for doc brevity). **Trade counts must always be equal.**
 
 ---
 
@@ -302,15 +374,16 @@ $$ LANGUAGE plpgsql SECURITY DEFINER;
 │ 👤 Username               ⏳ PENDING│
 │ Score: 25 • Last seen: 2 hours ago  │
 ├─────────────────────────────────────┤
-│ You want: 12 pages                  │
-│ They want: 13 pages                 │
+│ You want: [Full page list] (N pages)│
+│ They want: [Full page list] (N pages)│
 ├─────────────────────────────────────┤
 │ [Request Trade] 🤝 (ENABLED)        │
 │ ℹ️ User has a pending request       │
 └─────────────────────────────────────┘
 ```
 **CSS:** `opacity: 1`, small info badge  
-**Behavior:** Fully clickable, informational only
+**Behavior:** Fully clickable, informational only  
+**Note:** Equal page counts enforced (N = N)
 
 ---
 
@@ -320,15 +393,16 @@ $$ LANGUAGE plpgsql SECURITY DEFINER;
 │ 👤 Username              🔒 TRADING │
 │ Score: 25 • Last seen: 2 hours ago  │
 ├─────────────────────────────────────┤
-│ You want: 12 pages                  │
-│ They want: 13 pages                 │
+│ You want: [Full page list] (N pages)│
+│ They want: [Full page list] (N pages)│
 ├─────────────────────────────────────┤
-│ [Request Trade] 🤝 (DISABLED)       │
+│ [Request Trade] 🤝 (DISABLED/GRAY)  │
 │ 🔒 Currently in another trade       │
 └─────────────────────────────────────┘
 ```
 **CSS:** `opacity: 0.5`, grayed out  
-**Behavior:** Button disabled, cannot interact
+**Behavior:** Button disabled (grayed out), cannot interact  
+**Note:** Equal page counts (N = N)
 
 ---
 
@@ -338,8 +412,10 @@ $$ LANGUAGE plpgsql SECURITY DEFINER;
 │ 👤 Username                  ⏳ SENT│
 │ Waiting for their response...       │
 ├─────────────────────────────────────┤
-│ You offered: 13 pages               │
-│ You requested: 12 pages             │
+│ You offered: [Full page list]       │
+│              (N pages)              │
+│ You requested: [Full page list]     │
+│                (N pages)            │
 ├─────────────────────────────────────┤
 │ [📋 Copy Discord Message]           │
 │ [📜 Copy Pull/Sort Script]          │
@@ -347,7 +423,8 @@ $$ LANGUAGE plpgsql SECURITY DEFINER;
 └─────────────────────────────────────┘
 ```
 **CSS:** `opacity: 1`, highlighted border  
-**Behavior:** Can cancel, can copy messages
+**Behavior:** Can cancel, can copy messages  
+**Note:** Equal page counts (N = N)
 
 ---
 
@@ -357,15 +434,18 @@ $$ LANGUAGE plpgsql SECURITY DEFINER;
 │ 🔔 TRADE REQUEST                    │
 │ 👤 Username wants to trade!         │
 ├─────────────────────────────────────┤
-│ They're offering: 12 pages          │
-│ You would give: 13 pages            │
+│ They're offering: [Full page list]  │
+│                   (N pages)         │
+│ You would give: [Full page list]    │
+│                 (N pages)           │
 ├─────────────────────────────────────┤
 │ [✅ Accept Trade] (PRIMARY)         │
 │ [❌ Reject Trade] (SECONDARY)       │
 └─────────────────────────────────────┘
 ```
 **CSS:** `opacity: 1`, green highlight  
-**Behavior:** PINNED TO TOP, can accept/reject
+**Behavior:** PINNED TO TOP, can accept/reject  
+**Note:** Equal page counts (N = N)
 
 ---
 
@@ -375,8 +455,10 @@ $$ LANGUAGE plpgsql SECURITY DEFINER;
 │ 👤 Username                  ✅ ACTIVE│
 │ Trade in progress                   │
 ├─────────────────────────────────────┤
-│ You're offering: 13 pages           │
-│ You're requesting: 12 pages         │
+│ You're offering: [Full page list]   │
+│                  (N pages)          │
+│ You're requesting: [Full page list] │
+│                    (N pages)        │
 ├─────────────────────────────────────┤
 │ [📋 Copy Discord Message]           │
 │ [📜 Copy Pull/Sort Script]          │
@@ -385,7 +467,8 @@ $$ LANGUAGE plpgsql SECURITY DEFINER;
 └─────────────────────────────────────┘
 ```
 **CSS:** `opacity: 1`, blue highlight  
-**Behavior:** PINNED TO TOP, can complete/cancel
+**Behavior:** PINNED TO TOP, can complete/cancel  
+**Note:** Equal page counts (N = N)
 
 ---
 
